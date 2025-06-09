@@ -11,12 +11,11 @@ import (
 func worker(id int, jobs <-chan string, quit <-chan struct{}, wg *sync.WaitGroup, currentGoroutines *int32) {
 	defer wg.Done()
 
-	defer atomic.AddInt32(currentGoroutines, -1)
-
 	for {
 		select {
 		case <-quit:
 			fmt.Printf("Worker %d received quit signal, stopping...\n", id)
+			atomic.AddInt32(currentGoroutines, -1)
 			return
 		case job, ok := <-jobs:
 			if !ok {
@@ -32,11 +31,13 @@ func worker(id int, jobs <-chan string, quit <-chan struct{}, wg *sync.WaitGroup
 }
 
 const (
-	managerInterval    = 500 * time.Millisecond
-	scaleUpThreshold   = 5  // количество задач в очереди для увеличения количества горутин
-	scaleDownThreshold = 1  // количество задач в очереди для уменьшения количества горутин
-	maxGoroutines      = 20 // максимальное количество горутин-воркеров
-	minGoroutines      = 3  // минимальное количество горутин-воркеров
+	managerInterval = 500 * time.Millisecond
+
+	scaleUpThreshold   = 5 // количество задач в очереди для увеличения количества горутин
+	scaleDownThreshold = 1 // количество задач в очереди для уменьшения количества горутин
+
+	maxGoroutines = 20 // максимальное количество горутин-воркеров
+	minGoroutines = 3  // минимальное количество горутин-воркеров
 )
 
 func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sync.WaitGroup, currentGoroutines *int32, workerID *int) {
@@ -56,13 +57,17 @@ func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sy
 				wg.Add(1)
 				go worker(*workerID, jobs, quit, wg, currentGoroutines)
 				fmt.Printf("Scaled up: added worker %d, total workers: %d\n", *workerID, activeGoroutines+1)
-			} else if jobsInQueue < scaleDownThreshold && activeGoroutines > minGoroutines {
+				continue
+			}
+
+			if jobsInQueue < scaleDownThreshold && activeGoroutines > minGoroutines {
 				select {
 				case quit <- struct{}{}:
 					fmt.Printf("Scaled down: total workers: %d\n", activeGoroutines-1)
 				default:
 				}
 			}
+
 		case <-ctx.Done():
 			if err := ctx.Err(); err != nil {
 				fmt.Printf("Manager stopped: %w", err)
@@ -73,6 +78,23 @@ func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sy
 			return
 		}
 	}
+}
+
+const (
+	// Настроим сон для генератора, чтобы имитировать неравномерную нагрузку задачами
+	generatorSleepInterval  = 3 * time.Second // интервал между генерацией задач
+	generatorSleepFrequency = 25              // частота, с которой горутина-генератор будет "спать"
+)
+
+func taskGenerator(jobs chan<- string, numberOfJobs int) {
+	for i := 0; i < numberOfJobs; i++ {
+		if i%generatorSleepFrequency == 0 {
+			time.Sleep(generatorSleepInterval)
+		}
+		job := fmt.Sprintf("Job %d", i+1)
+		jobs <- job
+	}
+	close(jobs)
 }
 
 const (
@@ -103,17 +125,8 @@ func main() {
 	// создать задачи для горутин
 	var numberOfJobs int
 	fmt.Scan(&numberOfJobs)
-	go func() {
-		for i := 0; i < numberOfJobs; i++ {
-			if i%25 == 0 {
-				time.Sleep(3 * time.Second)
-			}
-			job := fmt.Sprintf("Job %d", i+1)
-			jobs <- job
-		}
-		close(jobs)
-	}()
+
+	go taskGenerator(jobs, numberOfJobs)
 
 	wg.Wait()
-
 }
