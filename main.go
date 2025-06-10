@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func worker(id int, jobs <-chan string, quit <-chan struct{}, wg *sync.WaitGroup, currentGoroutines *int32) {
+func worker(id int32, jobs <-chan string, quit <-chan struct{}, wg *sync.WaitGroup, currentGoroutines *int32) {
 	defer wg.Done()
 
 	for {
@@ -19,7 +19,8 @@ func worker(id int, jobs <-chan string, quit <-chan struct{}, wg *sync.WaitGroup
 			return
 		case job, ok := <-jobs:
 			if !ok {
-				fmt.Printf("Worker %d: job channel closed, exiting...\n", id)
+				fmt.Printf("Worker %d job channel closed, exiting...\n", id)
+				atomic.AddInt32(currentGoroutines, -1)
 				return
 			}
 			fmt.Printf("Worker %d processing job: %s\n", id, job)
@@ -40,7 +41,7 @@ const (
 	minGoroutines = 3  // минимальное количество горутин-воркеров
 )
 
-func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sync.WaitGroup, currentGoroutines *int32, workerID *int) {
+func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sync.WaitGroup, currentGoroutines *int32, lastWorkerID *int32) {
 	ticker := time.NewTicker(managerInterval)
 	defer ticker.Stop()
 
@@ -51,12 +52,12 @@ func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sy
 			jobsInQueue := len(jobs)
 
 			if jobsInQueue > scaleUpThreshold && activeGoroutines < maxGoroutines {
-				*workerID++
-				atomic.AddInt32(currentGoroutines, 1)
+				newID := atomic.AddInt32(lastWorkerID, 1)
+				newCount := atomic.AddInt32(currentGoroutines, 1)
 
 				wg.Add(1)
-				go worker(*workerID, jobs, quit, wg, currentGoroutines)
-				fmt.Printf("Scaled up: added worker %d, total workers: %d\n", *workerID, activeGoroutines+1)
+				go worker(newID, jobs, quit, wg, currentGoroutines)
+				fmt.Printf("Scaled up: added worker %d, total workers: %d\n", newID, newCount)
 				continue
 			}
 
@@ -70,7 +71,7 @@ func manager(ctx context.Context, jobs <-chan string, quit chan struct{}, wg *sy
 
 		case <-ctx.Done():
 			if err := ctx.Err(); err != nil {
-				fmt.Printf("Manager stopped: %w", err)
+				fmt.Printf("Manager stopped: %v\n", err)
 				return
 			}
 
@@ -86,7 +87,9 @@ const (
 	generatorSleepFrequency = 25              // частота, с которой горутина-генератор будет "спать"
 )
 
-func taskGenerator(jobs chan<- string, numberOfJobs int) {
+func taskGenerator(jobs chan<- string, numberOfJobs int, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	for i := 0; i < numberOfJobs; i++ {
 		if i%generatorSleepFrequency == 0 {
 			time.Sleep(generatorSleepInterval)
@@ -103,30 +106,34 @@ const (
 )
 
 func main() {
-	// инициализировать канал
 	jobs := make(chan string, taskQueueSize)
-	wg := &sync.WaitGroup{}
-	var currentGoroutines int32 = initGoroutines
-	var workerID int = initGoroutines
+	var (
+		wg                sync.WaitGroup
+		currentGoroutines int32 = initGoroutines
+		lastWorkerID      int32 = initGoroutines
+	)
 
-	//создать начальное количество горутин-воркеров
 	quit := make(chan struct{})
 	for i := 1; i <= initGoroutines; i++ {
 		wg.Add(1)
-		go worker(i, jobs, quit, wg, &currentGoroutines)
+		go worker(int32(i), jobs, quit, &wg, &currentGoroutines)
 	}
 
-	// создать горутину-менеджер
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go manager(ctx, jobs, quit, wg, &currentGoroutines, &workerID)
+	go manager(ctx, jobs, quit, &wg, &currentGoroutines, &lastWorkerID)
 
-	// создать задачи для горутин
-	var numberOfJobs int
+	var (
+		numberOfJobs int
+		generatorWg  sync.WaitGroup
+	)
+	fmt.Print("Enter the number of tasks: ")
 	fmt.Scan(&numberOfJobs)
 
-	go taskGenerator(jobs, numberOfJobs)
+	generatorWg.Add(1)
+	go taskGenerator(jobs, numberOfJobs, &generatorWg)
 
+	generatorWg.Wait()
 	wg.Wait()
 }
